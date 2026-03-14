@@ -1,0 +1,63 @@
+// Fuel EU Dashboard - Prisma Schema
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Route {
+  id               Int     @id @default(autoincrement())
+  routeId          String  @unique @map("route_id")
+  year             Int
+  ghgIntensity     Float   @map("ghg_intensity")
+  isBaseline       Boolean @default(false) @map("is_baseline")
+  fuelConsumption  Float   @map("fuel_consumption")
+
+  @@map("routes")
+}
+
+model ShipCompliance {
+  id          Int    @id @default(autoincrement())
+  shipId      String @map("ship_id")
+  year        Int
+  cbGco2eq    Float  @map("cb_gco2eq")
+
+  @@unique([shipId, year])
+  @@map("ship_compliance")
+}
+
+model BankEntry {
+  id          Int      @id @default(autoincrement())
+  shipId      String   @map("ship_id")
+  year        Int
+  amountGco2eq Float   @map("amount_gco2eq")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("bank_entries")
+}
+
+model Pool {
+  id        Int          @id @default(autoincrement())
+  year      Int
+  createdAt DateTime     @default(now()) @map("created_at")
+  members   PoolMember[]
+
+  @@map("pools")
+}
+
+model PoolMember {
+  poolId    Int    @map("pool_id")
+  shipId    String @map("ship_id")
+  cbBefore  Float  @map("cb_before")
+  cbAfter   Float  @map("cb_after")
+
+  pool Pool @relation(fields: [poolId], references: [id])
+
+  @@id([poolId, shipId])
+  @@map("pool_members")
+}
