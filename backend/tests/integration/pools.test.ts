@@ -1,33 +1,21 @@
 import request from 'supertest';
-import app from '../../src/infrastructure/server/app';
-import { seedTestDb, cleanTestDb, disconnectTestDb, testPrisma } from './helpers/dbSetup';
+import { createTestApp, type TestAppHandle } from './helpers/dbSetup';
 import { TARGET_INTENSITY_2025 } from '../../src/core/domain/constants';
 import { computeCB } from '../../src/core/domain/formulas';
 
-beforeAll(async () => {
-  await seedTestDb();
+let handle: TestAppHandle;
 
-  // Pre-seed compliance snapshots so pool service can resolve CB without hitting routes
+beforeAll(async () => {
+  handle = createTestApp();
+
+  // Pre-seed compliance snapshots so pool service can resolve CB
   // ROUTE-001: surplus  CB = (89.3368 - 75) * 500 * 41000 ≈ +294M
   // ROUTE-002: deficit  CB = (89.3368 - 95.5) * 320 * 41000 ≈ -81M
   const cb1 = computeCB(75.0, 500.0);
   const cb2 = computeCB(95.5, 320.0);
 
-  await testPrisma.shipCompliance.upsert({
-    where: { shipId_year: { shipId: 'ROUTE-001', year: 2025 } },
-    create: { shipId: 'ROUTE-001', year: 2025, cbGco2eq: cb1 },
-    update: { cbGco2eq: cb1 },
-  });
-  await testPrisma.shipCompliance.upsert({
-    where: { shipId_year: { shipId: 'ROUTE-002', year: 2025 } },
-    create: { shipId: 'ROUTE-002', year: 2025, cbGco2eq: cb2 },
-    update: { cbGco2eq: cb2 },
-  });
-});
-
-afterAll(async () => {
-  await cleanTestDb();
-  await disconnectTestDb();
+  await handle.complianceRepo.upsertSnapshot('ROUTE-001', 2025, cb1);
+  await handle.complianceRepo.upsertSnapshot('ROUTE-002', 2025, cb2);
 });
 
 // ---------------------------------------------------------------------------
@@ -35,7 +23,7 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 describe('POST /pools', () => {
   it('creates a valid pool and returns allocations (happy path)', async () => {
-    const res = await request(app)
+    const res = await request(handle.app)
       .post('/pools')
       .send({ year: 2025, shipIds: ['ROUTE-001', 'ROUTE-002'] });
 
@@ -46,7 +34,7 @@ describe('POST /pools', () => {
   });
 
   it('deficit ship (ROUTE-002) exits pool with cbAfter >= 0', async () => {
-    const res = await request(app)
+    const res = await request(handle.app)
       .post('/pools')
       .send({ year: 2025, shipIds: ['ROUTE-001', 'ROUTE-002'] });
 
@@ -55,7 +43,7 @@ describe('POST /pools', () => {
   });
 
   it('surplus ship (ROUTE-001) does not exit with a negative balance', async () => {
-    const res = await request(app)
+    const res = await request(handle.app)
       .post('/pools')
       .send({ year: 2025, shipIds: ['ROUTE-001', 'ROUTE-002'] });
 
@@ -63,16 +51,13 @@ describe('POST /pools', () => {
     expect(r1.cbAfter).toBeGreaterThanOrEqual(0);
   });
 
-  it('pool is persisted in the database', async () => {
-    const res = await request(app)
+  it('pool is persisted in the repository', async () => {
+    const res = await request(handle.app)
       .post('/pools')
       .send({ year: 2025, shipIds: ['ROUTE-001', 'ROUTE-002'] });
 
-    const pool = await testPrisma.pool.findUnique({
-      where: { id: res.body.id },
-      include: { members: true },
-    });
-    expect(pool).not.toBeNull();
+    const pool = handle.poolRepo.pools.find(p => p.id === res.body.id);
+    expect(pool).not.toBeUndefined();
     expect(pool!.members).toHaveLength(2);
   });
 
@@ -80,22 +65,13 @@ describe('POST /pools', () => {
   // Error paths
   // ---------------------------------------------------------------------------
   it('returns 400 when total pooled CB is negative (all deficit ships)', async () => {
-    // Seed two deficit snapshots
     const cbDeficit1 = computeCB(TARGET_INTENSITY_2025 + 10, 200);
     const cbDeficit2 = computeCB(TARGET_INTENSITY_2025 + 20, 150);
 
-    await testPrisma.shipCompliance.upsert({
-      where: { shipId_year: { shipId: 'DEF-A', year: 2025 } },
-      create: { shipId: 'DEF-A', year: 2025, cbGco2eq: cbDeficit1 },
-      update: { cbGco2eq: cbDeficit1 },
-    });
-    await testPrisma.shipCompliance.upsert({
-      where: { shipId_year: { shipId: 'DEF-B', year: 2025 } },
-      create: { shipId: 'DEF-B', year: 2025, cbGco2eq: cbDeficit2 },
-      update: { cbGco2eq: cbDeficit2 },
-    });
+    await handle.complianceRepo.upsertSnapshot('DEF-A', 2025, cbDeficit1);
+    await handle.complianceRepo.upsertSnapshot('DEF-B', 2025, cbDeficit2);
 
-    const res = await request(app)
+    const res = await request(handle.app)
       .post('/pools')
       .send({ year: 2025, shipIds: ['DEF-A', 'DEF-B'] });
 
@@ -104,7 +80,7 @@ describe('POST /pools', () => {
   });
 
   it('returns 400 when only one shipId is supplied', async () => {
-    const res = await request(app)
+    const res = await request(handle.app)
       .post('/pools')
       .send({ year: 2025, shipIds: ['ROUTE-001'] });
 
@@ -112,7 +88,7 @@ describe('POST /pools', () => {
   });
 
   it('returns 400 when shipIds is empty', async () => {
-    const res = await request(app)
+    const res = await request(handle.app)
       .post('/pools')
       .send({ year: 2025, shipIds: [] });
 
@@ -120,7 +96,7 @@ describe('POST /pools', () => {
   });
 
   it('returns 400 when body is missing year', async () => {
-    const res = await request(app)
+    const res = await request(handle.app)
       .post('/pools')
       .send({ shipIds: ['ROUTE-001', 'ROUTE-002'] });
 
@@ -128,7 +104,7 @@ describe('POST /pools', () => {
   });
 
   it('returns 404 when a shipId has no snapshot and no route', async () => {
-    const res = await request(app)
+    const res = await request(handle.app)
       .post('/pools')
       .send({ year: 2025, shipIds: ['ROUTE-001', 'GHOST-SHIP'] });
 
